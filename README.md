@@ -1,6 +1,6 @@
 # make something
 
-build your first app with ai. no coding experience needed. seriously.
+Build your first app with ai. no coding experience needed. seriously.
 
 ## what is this?
 
