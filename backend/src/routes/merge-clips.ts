@@ -235,7 +235,29 @@ const fetchClipToFile = async (args: {
   throw new Error(lastError);
 };
 
-const runFfmpeg = (
+const escapeConcatListPath = (value: string): string => value.replace(/'/g, "'\\''");
+
+const createConcatListFile = async (inputPaths: string[], listPath: string): Promise<void> => {
+  const lines = inputPaths.map((inputPath) => `file '${escapeConcatListPath(inputPath)}'`);
+  await fs.writeFile(listPath, `${lines.join("\n")}\n`, "utf8");
+};
+
+const runFfmpegConcatDemuxer = (
+  listPath: string,
+  outputPath: string,
+): Promise<void> =>
+  new Promise((resolve, reject) => {
+    ffmpeg()
+      .input(listPath)
+      .inputOptions(["-f concat", "-safe 0"])
+      .outputOptions(["-c copy", "-an", "-movflags +faststart"])
+      .format("mp4")
+      .on("end", () => resolve())
+      .on("error", (error: Error) => reject(error))
+      .save(outputPath);
+  });
+
+const runFfmpegConcatFilter = (
   inputPaths: string[],
   outputPath: string,
   codec: "libx264" | "mpeg4",
@@ -499,22 +521,24 @@ router.post("/api/merge-clips", async (req, res) => {
       });
 
       try {
-        trace("info", requestId, "merge_codec_start", { codec: "libx264" });
-        await runFfmpeg(inputPaths, outputPath, "libx264");
-        trace("info", requestId, "merge_codec_success", { codec: "libx264" });
+        const concatListPath = path.join(tempDir, `concat-${randomUUID()}.txt`);
+        await createConcatListFile(inputPaths, concatListPath);
+        trace("info", requestId, "merge_codec_start", { codec: "copy-demuxer" });
+        await runFfmpegConcatDemuxer(concatListPath, outputPath);
+        trace("info", requestId, "merge_codec_success", { codec: "copy-demuxer" });
       } catch (error) {
-        mergeError = error instanceof Error ? error.message : "libx264 merge failed";
+        mergeError = error instanceof Error ? error.message : "copy-demuxer merge failed";
         trace("warn", requestId, "merge_codec_failed", {
-          codec: "libx264",
+          codec: "copy-demuxer",
           error: mergeError,
         });
         try {
           trace("info", requestId, "merge_codec_start", { codec: "mpeg4" });
-          await runFfmpeg(inputPaths, outputPath, "mpeg4");
-          trace("info", requestId, "merge_codec_success", { codec: "mpeg4" });
+          await runFfmpegConcatFilter(inputPaths, outputPath, "mpeg4");
+          trace("info", requestId, "merge_codec_success", { codec: "mpeg4-filter" });
         } catch (fallbackError) {
           const fallbackMessage =
-            fallbackError instanceof Error ? fallbackError.message : "mpeg4 merge failed";
+            fallbackError instanceof Error ? fallbackError.message : "mpeg4-filter merge failed";
           trace("error", requestId, "merge_failed", {
             mergeError,
             fallbackMessage,
