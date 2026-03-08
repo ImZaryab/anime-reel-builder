@@ -5,16 +5,20 @@ import clipProxyRouter from "./routes/clip-proxy";
 import mergeClipsRouter from "./routes/merge-clips";
 import renderReelRouter from "./routes/render-reel";
 
+const normalizeOrigin = (origin: string): string => origin.trim().replace(/\/+$/, "");
+
 const app = express();
 const port = Number(process.env.PORT || 8787);
 const configuredCorsOrigins = (process.env.CORS_ORIGIN ?? "")
   .split(",")
-  .map((origin) => origin.trim())
+  .map((origin) => normalizeOrigin(origin))
   .filter(Boolean);
 
 app.disable("x-powered-by");
 app.use((req, res, next) => {
-  const requestOrigin = typeof req.headers.origin === "string" ? req.headers.origin : "";
+  const requestOrigin = normalizeOrigin(
+    typeof req.headers.origin === "string" ? req.headers.origin : "",
+  );
   const allowAnyOrigin = configuredCorsOrigins.length === 0;
   const allowedOrigin = allowAnyOrigin
     ? "*"

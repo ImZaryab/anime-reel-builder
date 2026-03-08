@@ -937,24 +937,59 @@ const fetchMediaWithDirectFallback = async (
   const directUrl = toMediaApiUrl(path);
   const canFallback = directUrl !== path;
 
-  try {
-    const response = await fetch(path, init);
-    if (!canFallback || response.ok || response.status < 500) {
-      return response;
-    }
-
-    const responseText = await response.clone().text().catch(() => "");
-    if (!/socket hang up|econnreset|failed to proxy/i.test(responseText)) {
-      return response;
-    }
-  } catch (error) {
-    if (!canFallback) {
-      if (error instanceof Error) throw error;
-      throw new Error("media request failed");
+  if (canFallback) {
+    try {
+      return await fetch(directUrl, init);
+    } catch {
+      // fall through to proxied path
     }
   }
 
-  return fetch(directUrl, init);
+  const response = await fetch(path, init);
+  if (!canFallback || response.ok || response.status < 500) {
+    return response;
+  }
+
+  const responseText = await response.clone().text().catch(() => "");
+  const isExternalRouterFailure =
+    /socket hang up|econnreset|failed to proxy|router_external_target_error|bad gateway|service unavailable|upstream/i.test(
+      responseText,
+    ) || [502, 503, 504].includes(response.status);
+
+  if (!isExternalRouterFailure) {
+    return response;
+  }
+
+  try {
+    return await fetch(directUrl, init);
+  } catch (error) {
+    if (error instanceof Error) throw error;
+    throw new Error("media request failed");
+  }
+};
+
+const fetchMediaAssetWithDirectFallback = async (url: string): Promise<Blob> => {
+  const directUrl = toMediaApiUrl(url);
+  const canFallback = directUrl !== url;
+
+  if (canFallback) {
+    try {
+      const response = await fetch(directUrl);
+      if (response.ok) return response.blob();
+    } catch {
+      // fall through to proxied path
+    }
+  }
+
+  const response = await fetch(url);
+  if (response.ok) return response.blob();
+
+  if (canFallback) {
+    const fallback = await fetch(directUrl);
+    if (fallback.ok) return fallback.blob();
+  }
+
+  throw new Error("could not fetch media asset");
 };
 
 const toPlayableUrl = (url: string, refererUrl?: string): string => {
@@ -1897,7 +1932,7 @@ export default function Home() {
     if (!clipPlaybackUrl) return;
     try {
       setIsRenderingOutput(true);
-      const videoBlob = await (await fetch(clipPlaybackUrl)).blob();
+      const videoBlob = await fetchMediaAssetWithDirectFallback(clipPlaybackUrl);
       const formData = new FormData();
       formData.append(
         "video",
@@ -1915,7 +1950,7 @@ export default function Home() {
         formData.append("voiceover", voiceoverUploadFile);
       }
       if (hasMusic && musicPreviewUrl) {
-        const musicBlob = await (await fetch(musicPreviewUrl)).blob();
+        const musicBlob = await fetchMediaAssetWithDirectFallback(musicPreviewUrl);
         formData.append(
           "music",
           new File([musicBlob], musicName || "music.mp3", {

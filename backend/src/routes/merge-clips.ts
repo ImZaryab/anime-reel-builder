@@ -37,12 +37,16 @@ const looksLikeVideoBuffer = (buffer: Buffer): boolean => {
 
   if (buffer.subarray(0, 4).toString("ascii") === "OggS") return true;
   if (buffer.subarray(0, 3).toString("ascii") === "FLV") return true;
-  if (buffer[0] === 0x47 && (buffer.length < 189 || buffer[188] === 0x47)) return true;
+  if (buffer[0] === 0x47 && (buffer.length < 189 || buffer[188] === 0x47))
+    return true;
 
   return false;
 };
 
-const fetchClipBuffer = async (streamUrl: string, refererUrl?: string): Promise<Buffer> => {
+const fetchClipBuffer = async (
+  streamUrl: string,
+  refererUrl?: string,
+): Promise<Buffer> => {
   const attempts: Array<{ withReferer: boolean; withRange: boolean }> = [
     { withReferer: true, withRange: true },
     { withReferer: false, withRange: true },
@@ -104,7 +108,9 @@ const runFfmpeg = (
       command.input(inputPath);
     }
     const concatInputs = inputPaths.map((_, index) => `[${index}:v]`).join("");
-    const filterChains = [`${concatInputs}concat=n=${inputPaths.length}:v=1:a=0[vout]`];
+    const filterChains = [
+      `${concatInputs}concat=n=${inputPaths.length}:v=1:a=0[vout]`,
+    ];
 
     command
       .complexFilter(filterChains)
@@ -138,7 +144,11 @@ const probeDurationSeconds = (inputPath: string): Promise<number> =>
         (stream) => stream.codec_type === "video",
       );
       const streamDuration = Number(videoStream?.duration ?? 0);
-      resolve(Number.isFinite(streamDuration) && streamDuration > 0 ? streamDuration : 0);
+      resolve(
+        Number.isFinite(streamDuration) && streamDuration > 0
+          ? streamDuration
+          : 0,
+      );
     });
   });
 
@@ -185,13 +195,17 @@ const normalizeClip = (
       ])
       .format("mp4")
       .on("end", () => resolve({ ok: true }))
-      .on("error", (error: Error) => resolve({ ok: false, error: error.message }))
+      .on("error", (error: Error) =>
+        resolve({ ok: false, error: error.message }),
+      )
       .save(outputPath);
   });
 
 router.post("/api/merge-clips", async (req, res) => {
   const requestId = randomUUID().slice(0, 8);
   let tempDir = "";
+
+  console.log("Received request for /merge-clips");
 
   try {
     const body = req.body as MergeRequest;
@@ -218,14 +232,21 @@ router.post("/api/merge-clips", async (req, res) => {
         const parsed = new URL(clip.streamUrl);
         if (!allowedProtocols.has(parsed.protocol)) continue;
         const buffer = await fetchClipBuffer(clip.streamUrl, clip.refererUrl);
-        const rawPath = path.join(tempDir, `raw-${String(index).padStart(3, "0")}.mp4`);
+        const rawPath = path.join(
+          tempDir,
+          `raw-${String(index).padStart(3, "0")}.mp4`,
+        );
         await fs.writeFile(rawPath, buffer);
 
         const normalizedPath = path.join(
           tempDir,
           `norm-${String(index).padStart(3, "0")}.mp4`,
         );
-        const libx264Result = await normalizeClip(rawPath, normalizedPath, "libx264");
+        const libx264Result = await normalizeClip(
+          rawPath,
+          normalizedPath,
+          "libx264",
+        );
         const stats = await fs.stat(normalizedPath).catch(() => null);
         if (!stats || stats.size === 0 || !libx264Result.ok) {
           await normalizeClip(rawPath, normalizedPath, "mpeg4");
@@ -238,7 +259,8 @@ router.post("/api/merge-clips", async (req, res) => {
         inputPaths.push(normalizedPath);
       } catch (error) {
         downloadFailures += 1;
-        lastDownloadError = error instanceof Error ? error.message : "unknown download error";
+        lastDownloadError =
+          error instanceof Error ? error.message : "unknown download error";
       }
     }
 
@@ -261,11 +283,21 @@ router.post("/api/merge-clips", async (req, res) => {
       let finalPath = singlePath;
       let trimApplied = false;
       const singleDuration = await probeDurationSeconds(singlePath);
-      const trimThreshold = targetDurationSeconds > 0 ? targetDurationSeconds + maxOverrunSeconds : 0;
+      const trimThreshold =
+        targetDurationSeconds > 0
+          ? targetDurationSeconds + maxOverrunSeconds
+          : 0;
       if (trimThreshold > 0 && singleDuration > trimThreshold) {
-        const trimmedSinglePath = path.join(tempDir, `trimmed-single-${randomUUID()}.mp4`);
+        const trimmedSinglePath = path.join(
+          tempDir,
+          `trimmed-single-${randomUUID()}.mp4`,
+        );
         try {
-          await trimVideoToDuration(singlePath, trimmedSinglePath, targetDurationSeconds);
+          await trimVideoToDuration(
+            singlePath,
+            trimmedSinglePath,
+            targetDurationSeconds,
+          );
           finalPath = trimmedSinglePath;
           trimApplied = true;
         } catch {
@@ -285,12 +317,15 @@ router.post("/api/merge-clips", async (req, res) => {
     try {
       await runFfmpeg(inputPaths, outputPath, "libx264");
     } catch (error) {
-      mergeError = error instanceof Error ? error.message : "libx264 merge failed";
+      mergeError =
+        error instanceof Error ? error.message : "libx264 merge failed";
       try {
         await runFfmpeg(inputPaths, outputPath, "mpeg4");
       } catch (fallbackError) {
         const fallbackMessage =
-          fallbackError instanceof Error ? fallbackError.message : "mpeg4 merge failed";
+          fallbackError instanceof Error
+            ? fallbackError.message
+            : "mpeg4 merge failed";
         logger.error("merge_failed", {
           scope: "merge-clips",
           mergeError,
@@ -322,12 +357,17 @@ router.post("/api/merge-clips", async (req, res) => {
     let finalBuffer = mergedBuffer;
     let trimApplied = false;
     const mergedDuration = await probeDurationSeconds(outputPath);
-    const trimThreshold = targetDurationSeconds > 0 ? targetDurationSeconds + maxOverrunSeconds : 0;
+    const trimThreshold =
+      targetDurationSeconds > 0 ? targetDurationSeconds + maxOverrunSeconds : 0;
 
     if (trimThreshold > 0 && mergedDuration > trimThreshold) {
       const trimmedPath = path.join(tempDir, `trimmed-${randomUUID()}.mp4`);
       try {
-        await trimVideoToDuration(outputPath, trimmedPath, targetDurationSeconds);
+        await trimVideoToDuration(
+          outputPath,
+          trimmedPath,
+          targetDurationSeconds,
+        );
         const trimmedBuffer = await fs.readFile(trimmedPath);
         if (trimmedBuffer.byteLength > 0) {
           finalBuffer = trimmedBuffer;
@@ -344,7 +384,8 @@ router.post("/api/merge-clips", async (req, res) => {
     res.setHeader("x-merge-trim-applied", trimApplied ? "true" : "false");
     return res.status(200).send(finalBuffer);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "unexpected merge route failure";
+    const message =
+      error instanceof Error ? error.message : "unexpected merge route failure";
     return res.status(500).json({
       error: "could not merge clips right now",
       details: { requestId, message },
