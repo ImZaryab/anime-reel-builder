@@ -22,6 +22,7 @@ This Express service hosts runtime-heavy media endpoints that require ffmpeg/ffp
   - `PORT` (platform default is fine)
   - Optional: `FFMPEG_PATH`, `FFPROBE_PATH`
   - Optional: `CORS_ORIGIN` (comma-separated allowlist; unset allows all)
+  - Optional: `MERGE_MAX_CLIPS` and `MERGE_MAX_SOURCE_BYTES` (OOM safety for clip merge)
 - In Vercel (Next app), set:
   - `MEDIA_BACKEND_URL=https://<your-media-backend-domain>`
   - `NEXT_PUBLIC_MEDIA_BACKEND_URL=https://<your-media-backend-domain>`

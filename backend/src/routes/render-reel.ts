@@ -44,6 +44,29 @@ const upload = multer({
   },
 });
 
+const renderMemorySnapshot = () => {
+  const usage = process.memoryUsage();
+  return {
+    rssMb: Math.round(usage.rss / 1024 / 1024),
+    heapUsedMb: Math.round(usage.heapUsed / 1024 / 1024),
+    externalMb: Math.round(usage.external / 1024 / 1024),
+  };
+};
+
+const renderTrace = (
+  level: "info" | "warn" | "error",
+  requestId: string,
+  event: string,
+  payload?: Record<string, unknown>,
+) => {
+  logger[level](event, {
+    scope: "render-reel",
+    requestId,
+    memory: renderMemorySnapshot(),
+    ...(payload ?? {}),
+  });
+};
+
 const getTextField = (value: unknown, fallback = ""): string => {
   if (typeof value === "string") return value;
   if (Array.isArray(value) && typeof value[0] === "string") return value[0];
@@ -540,23 +563,46 @@ router.post(
       const muteOriginalAudio = getTextField(req.body.muteOriginalAudio, "false") === "true";
       const musicVolume = Number(getTextField(req.body.musicVolume, "35"));
 
+      renderTrace("info", requestId, "request_received", {
+        hasVideo: Boolean(video),
+        hasVoiceover: Boolean(voiceover),
+        hasMusic: Boolean(music),
+        captionsCount: captions.length,
+        captionPosition,
+        captionStyle,
+        captionAnimation,
+        captionOffsetSeconds,
+        muteOriginalAudio,
+        musicVolume,
+      });
+
       if (!video) {
+        renderTrace("warn", requestId, "request_rejected_missing_video");
         return res.status(400).json({ error: "video is required" });
       }
 
       tempDir = await fs.mkdtemp(path.join(tmpdir(), "reel-render-"));
+      renderTrace("info", requestId, "temp_dir_created", { tempDir });
       const videoPath = path.join(tempDir, "video.mp4");
       await fs.writeFile(videoPath, video.buffer);
+      renderTrace("info", requestId, "video_written", {
+        bytes: video.buffer.byteLength,
+      });
 
       const mobileFittedPath = path.join(tempDir, "mobile-fitted.mp4");
+      renderTrace("info", requestId, "mobile_fit_start");
       await fitVideoToMobileCanvas({
         inputPath: videoPath,
         outputPath: mobileFittedPath,
       });
+      renderTrace("info", requestId, "mobile_fit_success");
       let sourceVideoPath = mobileFittedPath;
 
       if (captions.length) {
         const captionedPath = path.join(tempDir, "captioned.mp4");
+        renderTrace("info", requestId, "caption_burn_start", {
+          captionsCount: captions.length,
+        });
         await burnCaptionsIntoVideo({
           inputPath: sourceVideoPath,
           outputPath: captionedPath,
@@ -568,22 +614,32 @@ router.post(
             offsetSeconds: captionOffsetSeconds,
           },
         });
+        renderTrace("info", requestId, "caption_burn_success");
         sourceVideoPath = captionedPath;
+      } else {
+        renderTrace("info", requestId, "caption_burn_skipped");
       }
 
       let voicePath: string | undefined;
       if (voiceover) {
         voicePath = path.join(tempDir, "voiceover.mp3");
         await fs.writeFile(voicePath, voiceover.buffer);
+        renderTrace("info", requestId, "voiceover_written", {
+          bytes: voiceover.buffer.byteLength,
+        });
       }
 
       let musicPath: string | undefined;
       if (music) {
         musicPath = path.join(tempDir, "music.mp3");
         await fs.writeFile(musicPath, music.buffer);
+        renderTrace("info", requestId, "music_written", {
+          bytes: music.buffer.byteLength,
+        });
       }
 
       const outputPath = path.join(tempDir, `rendered-${randomUUID()}.mp4`);
+      renderTrace("info", requestId, "audio_mix_start");
       await renderReel({
         videoPath: sourceVideoPath,
         voicePath,
@@ -592,11 +648,16 @@ router.post(
         muteOriginalAudio,
         outputPath,
       });
+      renderTrace("info", requestId, "audio_mix_success");
 
       const output = await fs.readFile(outputPath);
+      renderTrace("info", requestId, "output_read", {
+        bytes: output.byteLength,
+      });
       res.setHeader("content-type", "video/mp4");
       res.setHeader("cache-control", "no-store");
       res.setHeader("x-render-request-id", requestId);
+      renderTrace("info", requestId, "response_ready");
       return res.status(200).send(output);
     } catch (error) {
       const details =
@@ -617,17 +678,16 @@ router.post(
               requestId,
             };
 
-      logger.error("render_failed", {
-        scope: "render-reel",
-        ...details,
-      });
+      renderTrace("error", requestId, "render_failed", details);
       return res.status(500).json({
         error: "could not render output video right now",
         details,
       });
     } finally {
       if (tempDir) {
+        renderTrace("info", requestId, "cleanup_start", { tempDir });
         await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+        renderTrace("info", requestId, "cleanup_complete");
       }
     }
   },

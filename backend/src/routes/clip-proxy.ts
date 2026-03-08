@@ -1,6 +1,8 @@
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeWebReadableStream } from "node:stream/web";
 import { Router } from "express";
+import { randomUUID } from "node:crypto";
+import { logger } from "../lib/logger";
 
 const router = Router();
 const allowedProtocols = new Set(["http:", "https:"]);
@@ -11,6 +13,7 @@ const pickHeader = (headers: Headers, key: string): string | null => {
 };
 
 const fetchUpstream = async (
+  requestId: string,
   targetUrl: string,
   baseHeaders: Headers,
   referer?: string,
@@ -23,6 +26,7 @@ const fetchUpstream = async (
   ];
 
   for (const attempt of attempts) {
+    const attemptLabel = `${attempt.withReferer ? "referer" : "no-referer"}_${attempt.withRange ? "range" : "no-range"}`;
     const headers = new Headers(baseHeaders);
     if (!attempt.withRange) {
       headers.delete("range");
@@ -41,15 +45,38 @@ const fetchUpstream = async (
     }
 
     try {
+      logger.info("upstream_attempt_start", {
+        scope: "clip-proxy",
+        requestId,
+        attempt: attemptLabel,
+      });
       const upstream = await fetch(targetUrl, {
         method: "GET",
         headers,
         cache: "no-store",
         redirect: "follow",
       });
-      if (upstream.ok || upstream.status === 206) return upstream;
+      if (upstream.ok || upstream.status === 206) {
+        logger.info("upstream_attempt_success", {
+          scope: "clip-proxy",
+          requestId,
+          attempt: attemptLabel,
+          status: upstream.status,
+        });
+        return upstream;
+      }
+      logger.warn("upstream_attempt_non_ok", {
+        scope: "clip-proxy",
+        requestId,
+        attempt: attemptLabel,
+        status: upstream.status,
+      });
     } catch {
-      // try next strategy
+      logger.warn("upstream_attempt_failed", {
+        scope: "clip-proxy",
+        requestId,
+        attempt: attemptLabel,
+      });
     }
   }
 
@@ -57,10 +84,19 @@ const fetchUpstream = async (
 };
 
 router.get("/api/clip-proxy", async (req, res) => {
+  const requestId = randomUUID().slice(0, 8);
+  res.setHeader("x-clip-proxy-request-id", requestId);
   const rawUrl = typeof req.query.url === "string" ? req.query.url : "";
   const rawReferer = typeof req.query.referer === "string" ? req.query.referer : "";
+  logger.info("request_received", {
+    scope: "clip-proxy",
+    requestId,
+    hasUrl: Boolean(rawUrl),
+    hasReferer: Boolean(rawReferer),
+  });
 
   if (!rawUrl) {
+    logger.warn("request_rejected_missing_url", { scope: "clip-proxy", requestId });
     return res.status(400).json({ error: "url is required" });
   }
 
@@ -68,10 +104,16 @@ router.get("/api/clip-proxy", async (req, res) => {
   try {
     target = new URL(rawUrl);
   } catch {
+    logger.warn("request_rejected_invalid_url", { scope: "clip-proxy", requestId });
     return res.status(400).json({ error: "invalid url" });
   }
 
   if (!allowedProtocols.has(target.protocol)) {
+    logger.warn("request_rejected_protocol", {
+      scope: "clip-proxy",
+      requestId,
+      protocol: target.protocol,
+    });
     return res.status(400).json({ error: "unsupported protocol" });
   }
 
@@ -85,11 +127,13 @@ router.get("/api/clip-proxy", async (req, res) => {
 
   try {
     const upstream = await fetchUpstream(
+      requestId,
       target.toString(),
       upstreamHeaders,
       rawReferer || undefined,
     );
     if (!upstream) {
+      logger.error("upstream_unavailable", { scope: "clip-proxy", requestId });
       return res.status(502).json({ error: "unable to load clip from source" });
     }
 
@@ -113,6 +157,11 @@ router.get("/api/clip-proxy", async (req, res) => {
     }
 
     if (upstream.body) {
+      logger.info("streaming_response", {
+        scope: "clip-proxy",
+        requestId,
+        status: upstream.status,
+      });
       Readable.fromWeb(
         upstream.body as unknown as NodeWebReadableStream<Uint8Array>,
       ).pipe(res);
@@ -120,8 +169,15 @@ router.get("/api/clip-proxy", async (req, res) => {
     }
 
     const data = Buffer.from(await upstream.arrayBuffer());
+    logger.info("buffered_response", {
+      scope: "clip-proxy",
+      requestId,
+      status: upstream.status,
+      bytes: data.byteLength,
+    });
     res.send(data);
   } catch {
+    logger.error("route_failed", { scope: "clip-proxy", requestId });
     return res.status(502).json({ error: "clip proxy failed" });
   }
 });
