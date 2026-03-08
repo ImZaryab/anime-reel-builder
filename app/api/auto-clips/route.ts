@@ -33,6 +33,34 @@ type GenerateRequest = {
 
 const CLIPS_PAGE = "https://animeclips.online/clips/";
 const ADMIN_AJAX_URL = "https://animeclips.online/wp-admin/admin-ajax.php";
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const fetchWithRetry = async (
+  url: string,
+  init: RequestInit,
+  maxAttempts = 3,
+): Promise<Response> => {
+  let lastResponse: Response | null = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const response = await fetch(url, init);
+    lastResponse = response;
+    if (response.ok) return response;
+    if (!RETRYABLE_STATUS.has(response.status) || attempt === maxAttempts) {
+      return response;
+    }
+    await sleep(350 * attempt);
+  }
+  return (
+    lastResponse ??
+    new Response(null, {
+      status: 500,
+      statusText: "unreachable",
+    })
+  );
+};
 
 const normalizeUrl = (url: string): string => {
   if (!url) return "";
@@ -66,9 +94,13 @@ const parseUseYourDriveConfig = (html: string) => {
 };
 
 const fetchAnimeList = async (query: string): Promise<AnimeItem[]> => {
-  const response = await fetch(CLIPS_PAGE, {
+  const response = await fetchWithRetry(CLIPS_PAGE, {
     cache: "no-store",
-    headers: { "user-agent": "Mozilla/5.0" },
+    headers: {
+      "user-agent": "Mozilla/5.0",
+      accept: "text/html,application/xhtml+xml",
+      "accept-language": "en-US,en;q=0.9",
+    },
   });
   if (!response.ok) return [];
 
@@ -102,9 +134,14 @@ const fetchAnimeList = async (query: string): Promise<AnimeItem[]> => {
 };
 
 const fetchFolders = async (animeUrl: string): Promise<FolderItem[]> => {
-  const pageResponse = await fetch(animeUrl, {
+  const pageResponse = await fetchWithRetry(animeUrl, {
     cache: "no-store",
-    headers: { "user-agent": "Mozilla/5.0" },
+    headers: {
+      "user-agent": "Mozilla/5.0",
+      accept: "text/html,application/xhtml+xml",
+      "accept-language": "en-US,en;q=0.9",
+      referer: CLIPS_PAGE,
+    },
   });
   if (!pageResponse.ok) return [];
 
@@ -123,12 +160,16 @@ const fetchFolders = async (animeUrl: string): Promise<FolderItem[]> => {
   form.set("_ajax_nonce", config.refreshNonce);
   form.set("page_url", animeUrl);
 
-  const treeResponse = await fetch(ADMIN_AJAX_URL, {
+  const treeResponse = await fetchWithRetry(ADMIN_AJAX_URL, {
     method: "POST",
     cache: "no-store",
     headers: {
       "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
       "user-agent": "Mozilla/5.0",
+      accept: "application/json,text/plain,*/*",
+      "accept-language": "en-US,en;q=0.9",
+      origin: "https://animeclips.online",
+      referer: animeUrl,
     },
     body: form.toString(),
   });
@@ -149,9 +190,14 @@ const fetchFolders = async (animeUrl: string): Promise<FolderItem[]> => {
 };
 
 const fetchClips = async (animeTitle: string, animeUrl: string, folderId: string): Promise<ClipItem[]> => {
-  const pageResponse = await fetch(animeUrl, {
+  const pageResponse = await fetchWithRetry(animeUrl, {
     cache: "no-store",
-    headers: { "user-agent": "Mozilla/5.0" },
+    headers: {
+      "user-agent": "Mozilla/5.0",
+      accept: "text/html,application/xhtml+xml",
+      "accept-language": "en-US,en;q=0.9",
+      referer: CLIPS_PAGE,
+    },
   });
   if (!pageResponse.ok) return [];
 
@@ -170,12 +216,16 @@ const fetchClips = async (animeTitle: string, animeUrl: string, folderId: string
   form.set("_ajax_nonce", config.refreshNonce);
   form.set("page_url", animeUrl);
 
-  const clipsResponse = await fetch(ADMIN_AJAX_URL, {
+  const clipsResponse = await fetchWithRetry(ADMIN_AJAX_URL, {
     method: "POST",
     cache: "no-store",
     headers: {
       "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
       "user-agent": "Mozilla/5.0",
+      accept: "application/json,text/plain,*/*",
+      "accept-language": "en-US,en;q=0.9",
+      origin: "https://animeclips.online",
+      referer: animeUrl,
     },
     body: form.toString(),
   });
@@ -372,31 +422,57 @@ export async function POST(request: Request) {
   const query = await inferSearchQuery(transcript, body.strategy);
   const animes = await fetchAnimeList(query);
   const animePool = animes.length ? animes : await fetchAnimeList("");
-  const pickedAnimes = animePool.slice(0, 10);
+  const pickedAnimes = animePool.slice(0, 20);
 
   const candidates: ClipItem[] = [];
+  let foldersFetched = 0;
+  let clipsFetched = 0;
 
   for (const anime of pickedAnimes) {
     const folders = await fetchFolders(anime.url);
+    foldersFetched += folders.length;
     const targetFolders = pickCandidateFolders(folders);
     for (const folder of targetFolders) {
       const clips = await fetchClips(anime.title, anime.url, folder.id);
+      clipsFetched += clips.length;
       for (const clip of clips) {
         if (!exclude.has(clip.id)) candidates.push(clip);
       }
-      if (candidates.length > 200) break;
+      if (candidates.length > 320) break;
     }
-    if (candidates.length > 200) break;
+    if (candidates.length > 320) break;
   }
 
-  if (!candidates.length) {
+  const dedupedCandidates = candidates.filter((clip, index, array) => (
+    array.findIndex((item) => item.id === clip.id) === index
+  ));
+
+  console.info("[auto-clips]", {
+    query,
+    animePool: animePool.length,
+    pickedAnimes: pickedAnimes.length,
+    foldersFetched,
+    clipsFetched,
+    candidatesRaw: candidates.length,
+    candidatesDeduped: dedupedCandidates.length,
+  });
+
+  if (!dedupedCandidates.length) {
     return NextResponse.json(
-      { error: "could not find matching anime clips right now" },
+      {
+        error: "could not find matching anime clips right now",
+        details: {
+          animePool: animePool.length,
+          pickedAnimes: pickedAnimes.length,
+          foldersFetched,
+          clipsFetched,
+        },
+      },
       { status: 500 },
     );
   }
 
-  const playableCandidates = await filterPlayableClips(candidates);
+  const playableCandidates = await filterPlayableClips(dedupedCandidates);
   if (!playableCandidates.length) {
     return NextResponse.json(
       { error: "could not find playable anime clips right now" },
